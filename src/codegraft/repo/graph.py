@@ -23,6 +23,7 @@ from pathlib import Path
 from codegraft.config import Config
 from codegraft.models.repo import RepoScan, RepoSummary
 from codegraft.repo.imports import ImportGraph, build_import_graph
+from codegraft.utils.text import strip_rel_prefix
 
 
 def _basename(path: str) -> str:
@@ -40,7 +41,7 @@ def resolve_target(target: str, scan: RepoScan) -> tuple[str | None, list[str]]:
     ``(None, [])`` when nothing matches.
     """
 
-    norm = target.replace("\\", "/").strip().lstrip("./").lower()
+    norm = strip_rel_prefix(target.replace("\\", "/").strip()).lower()
     paths = [f.path for f in scan.files]
     by_lower = {p.lower(): p for p in paths}
 

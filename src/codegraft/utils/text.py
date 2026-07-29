@@ -68,7 +68,25 @@ _NAMED_FILE_EXTS: frozenset[str] = frozenset(
         "svelte", "md", "yml", "yaml", "toml", "json",
     }
 )
-_NAMED_FILE_RE = re.compile(r"\b([\w./-]+\.([A-Za-z0-9]+))\b")
+# A leading `\b` would refuse to consume the dot of a dotfile mention (the
+# boundary sits *after* it), silently turning ".eslintrc.json" into
+# "eslintrc.json" — which then matches no candidate. A negative lookbehind
+# anchors the mention without eating its first character.
+_NAMED_FILE_RE = re.compile(r"(?<![\w/-])([\w./-]+\.([A-Za-z0-9]+))\b")
+
+
+def strip_rel_prefix(path: str) -> str:
+    """Drop leading ``./`` segments from a slash-separated path.
+
+    Deliberately *not* ``path.lstrip("./")``: ``lstrip`` takes a character *set*,
+    so it eats the leading dot of a dotfile too — turning
+    ``.github/workflows/ci.yml`` into ``github/workflows/ci.yml`` (matching
+    nothing) and ``.eslintrc.json`` into ``eslintrc.json``.
+    """
+
+    while path.startswith("./"):
+        path = path[2:]
+    return path
 
 
 def extract_named_files(request: str) -> set[str]:
@@ -89,7 +107,7 @@ def extract_named_files(request: str) -> set[str]:
     for mention, ext in _NAMED_FILE_RE.findall(request):
         if ext.lower() not in _NAMED_FILE_EXTS:
             continue
-        mention = mention.lower().lstrip("./")
+        mention = strip_rel_prefix(mention.lower())
         if not mention:
             continue
         found.add(mention)
@@ -154,14 +172,20 @@ def ranking_signal(text: str, max_chars: int = 240) -> str:
     if len(stripped) <= max_chars:
         return stripped
 
-    # Prefer a leading markdown heading (e.g. "# Add an OpenAI provider").
-    for line in stripped.splitlines():
-        if line.lstrip().startswith("#"):
-            heading = line.lstrip("#").strip()
-            if heading:
-                return heading
+    # Only the *first* meaningful line is considered. Scanning the whole request
+    # for any "#" line meant a later section heading won — a request whose goal is
+    # stated in prose but which ends with "## Constraints" ranked on the word
+    # "Constraints", and a "# TODO" inside a fenced code block hijacked it the
+    # same way. A heading below the opening line states a caveat, not the goal.
+    lines = [ln.strip() for ln in stripped.splitlines() if ln.strip()]
+    # Skip a decorative rule of bare hashes so it can't become the signal.
+    lines = [ln for ln in lines if ln.strip("#").strip()]
+    first_line = lines[0] if lines else stripped
 
-    first_line = next((ln.strip() for ln in stripped.splitlines() if ln.strip()), stripped)
+    # Prefer a leading markdown heading (e.g. "# Add an OpenAI provider").
+    if first_line.startswith("#"):
+        return first_line.lstrip("#").strip()
+
     if len(first_line) > max_chars:
         # A single long paragraph: take its first sentence.
         return _SENTENCE_SPLIT.split(first_line, maxsplit=1)[0]

@@ -22,25 +22,61 @@ def _line_has_keyword(line: str, keywords: set[str]) -> bool:
     return any(tok in keywords for tok in tokenize(line))
 
 
+def _hit_blocks(lines: list[str], keywords: set[str]) -> list[list[int]]:
+    """Merged keyword windows as ``[start, end, hits, first_hit]``, in file order.
+
+    Each keyword-bearing line contributes a ±``WINDOW`` window; touching or
+    overlapping windows merge into one block. ``hits`` counts the keyword lines
+    inside the merged block — the density signal that decides which blocks survive
+    a binding line cap — and ``first_hit`` is the block's earliest keyword line.
+    """
+
+    blocks: list[list[int]] = []
+    for i, line in enumerate(lines):
+        if not _line_has_keyword(line, keywords):
+            continue
+        lo, hi = max(0, i - WINDOW), min(len(lines) - 1, i + WINDOW)
+        if blocks and lo <= blocks[-1][1] + 1:
+            blocks[-1][1] = max(blocks[-1][1], hi)
+            blocks[-1][2] += 1
+        else:
+            blocks.append([lo, hi, 1, i])
+    return blocks
+
+
 def _select_line_indices(
     lines: list[str], keywords: set[str], max_lines: int
 ) -> tuple[list[int], bool]:
     """Choose which line indices to keep. Returns (sorted_indices, truncated)."""
 
-    keep: set[int] = set(range(min(HEADER_LINES, len(lines))))
+    header = range(min(HEADER_LINES, len(lines)))
+    blocks = _hit_blocks(lines, keywords)
 
-    for i, line in enumerate(lines):
-        if _line_has_keyword(line, keywords):
-            lo = max(0, i - WINDOW)
-            hi = min(len(lines), i + WINDOW + 1)
-            keep.update(range(lo, hi))
+    keep: set[int] = set(header)
+    for start, end, _hits, _first in blocks:
+        keep.update(range(start, end + 1))
+    if len(keep) <= max_lines:
+        # Everything fits: identical selection to a plain header + windows union.
+        return sorted(keep), False
 
-    ordered = sorted(keep)
-    truncated = False
-    if len(ordered) > max_lines:
-        ordered = ordered[:max_lines]
-        truncated = True
-    return ordered, truncated
+    # Over the cap. Trimming the sorted union (which is what we used to do) keeps
+    # the *earliest* lines, so the header plus an incidental early mention could
+    # consume the whole budget and drop the definition the request is actually
+    # about. Instead cap the header's share of a tight budget, then spend the rest
+    # on the densest keyword blocks first — an aside loses to the real cluster.
+    header_budget = min(HEADER_LINES, max(1, max_lines // 4))
+    keep = set(range(min(header_budget, len(lines))))
+    for start, end, _hits, first_hit in sorted(blocks, key=lambda b: (-b[2], b[0])):
+        room = max_lines - len(keep)
+        if room <= 0:
+            break
+        if end + 1 - start <= room:
+            keep.update(range(start, end + 1))
+        else:
+            # Too tight for the whole window: lead with the keyword line itself
+            # rather than the leading context that would push it out of frame.
+            keep.update(range(first_hit, min(end + 1, first_hit + room)))
+    return sorted(keep)[:max_lines], True
 
 
 def _render(lines: list[str], indices: list[int]) -> str:

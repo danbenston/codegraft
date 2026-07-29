@@ -21,7 +21,11 @@ from typing import Any
 from codegraft.config import Config
 from codegraft.errors import PlanValidationError, ProviderError
 from codegraft.models.plan import ImplementationPlan
-from codegraft.providers.base import PlanningRequest, supports_temperature
+from codegraft.providers.base import (
+    PlanningRequest,
+    rejects_temperature,
+    supports_temperature,
+)
 from codegraft.providers.prompt import build_planning_prompt
 
 
@@ -95,6 +99,21 @@ class AnthropicProvider:
         self._client = anthropic.Anthropic(api_key=key)
         return self._client
 
+    @staticmethod
+    def _create(client: Any, kwargs: dict[str, Any]) -> Any:
+        """Call the Messages API, retrying once without a rejected ``temperature``
+        so a model missing from ``_NO_SAMPLING_PREFIXES`` degrades instead of
+        failing. A rejected request consumes no tokens, so the retry is free."""
+
+        try:
+            return client.messages.create(**kwargs)
+        except Exception as exc:
+            if "temperature" not in kwargs or not rejects_temperature(exc):
+                raise
+            return client.messages.create(
+                **{k: v for k, v in kwargs.items() if k != "temperature"}
+            )
+
     def generate_plan(self, request: PlanningRequest) -> ImplementationPlan:
         client = self._ensure_client()
         system, user = build_planning_prompt(request)
@@ -112,7 +131,7 @@ class AnthropicProvider:
             kwargs["temperature"] = temperature
 
         try:
-            response = client.messages.create(**kwargs)
+            response = self._create(client, kwargs)
         except Exception as exc:  # wrap any SDK/transport error with context
             raise ProviderError(f"Anthropic request failed: {exc}") from exc
 

@@ -17,7 +17,11 @@ from typing import Any
 from codegraft.config import Config
 from codegraft.errors import PlanValidationError, ProviderError
 from codegraft.models.plan import ImplementationPlan
-from codegraft.providers.base import PlanningRequest
+from codegraft.providers.base import (
+    PlanningRequest,
+    rejects_temperature,
+    supports_temperature,
+)
 from codegraft.providers.prompt import build_planning_prompt
 
 
@@ -49,26 +53,41 @@ class OpenAIProvider:
         self._client = openai.OpenAI(api_key=key)
         return self._client
 
+    @staticmethod
+    def _parse(client: Any, kwargs: dict[str, Any]) -> Any:
+        """Call the structured-output endpoint, retrying once without a rejected
+        ``temperature`` so an unknown reasoning model degrades instead of failing."""
+
+        try:
+            return client.beta.chat.completions.parse(**kwargs)
+        except Exception as exc:
+            if "temperature" not in kwargs or not rejects_temperature(exc):
+                raise
+            return client.beta.chat.completions.parse(
+                **{k: v for k, v in kwargs.items() if k != "temperature"}
+            )
+
     def generate_plan(self, request: PlanningRequest) -> ImplementationPlan:
         client = self._ensure_client()
         system, user = build_planning_prompt(request)
 
+        model = self._config.provider.model
         kwargs: dict[str, Any] = {
-            "model": self._config.provider.model,
+            "model": model,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
             "response_format": ImplementationPlan,
         }
+        # Same gate the Anthropic adapter applies: reasoning models reject
+        # sampling params, and sending one turns a valid config into a 400.
         temperature = self._config.provider.temperature
-        if temperature is not None:
+        if temperature is not None and supports_temperature(model):
             kwargs["temperature"] = temperature
 
         try:
-            response = client.beta.chat.completions.parse(**kwargs)
-        except PlanValidationError:
-            raise
+            response = self._parse(client, kwargs)
         except Exception as exc:  # wrap any SDK/transport error with context
             raise ProviderError(f"OpenAI request failed: {exc}") from exc
 
