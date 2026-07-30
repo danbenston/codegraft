@@ -133,3 +133,36 @@ def test_plan_unknown_provider_errors(tmp_path: Path) -> None:
     )
     assert result.exit_code == 1
     assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+def test_malformed_config_reports_cleanly(tmp_path: Path) -> None:
+    """A typo'd codegraft.toml is a user error, not a crash.
+
+    `Config.load` raised TOMLDecodeError / pydantic ValidationError, neither of
+    which the CLI catches — so the user got a raw traceback. ConfigError existed
+    for exactly this and was never raised.
+    """
+
+    import pytest
+
+    from codegraft.config import Config
+    from codegraft.errors import ConfigError
+
+    (tmp_path / "codegraft.toml").write_text("[provider\nname = 'x'\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="not valid TOML"):
+        Config.load(tmp_path)
+
+    (tmp_path / "codegraft.toml").write_text(
+        '[analysis]\nmax_ranked_files = "twelve"\n', encoding="utf-8"
+    )
+    with pytest.raises(ConfigError, match="max_ranked_files"):
+        Config.load(tmp_path)
+
+
+def test_stub_plan_title_preserves_acronyms(tmp_path: Path) -> None:
+    # str.capitalize() lower-cased the remainder: "Add RBAC ..." -> "Add rbac ...".
+    from codegraft.config import Config
+    from codegraft.planning.service import build_stub_plan
+
+    plan = build_stub_plan("add RBAC to admin routes", tmp_path, Config())
+    assert plan.title == "Add RBAC to admin routes"

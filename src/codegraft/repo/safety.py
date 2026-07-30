@@ -18,6 +18,9 @@ from pathspec import PathSpec
 _SECRET_PATTERNS = [
     ".env",
     ".env.*",
+    # The suffix form is just as common as the dotfile form and was slipping
+    # through: "production.env", "local.env" matched neither pattern above.
+    "*.env",
     "*.pem",
     "*.key",
     "*.crt",
@@ -33,7 +36,16 @@ _SECRET_PATTERNS = [
     "id_ecdsa",
     "id_ed25519",
     "*.pkcs12",
+    "*.p8",           # Apple / APNs auth keys
+    "*.asc",          # ASCII-armoured PGP key material
+    "*.gpg",
     "credentials",
+    "credentials.*",  # e.g. GCP service-account "credentials.json"
+    ".netrc",
+    "_netrc",         # the Windows spelling
+    ".git-credentials",
+    "*.tfvars",       # Terraform variable files routinely hold secrets
+    "*.tfvars.json",
     ".npmrc",
     ".pypirc",
     "*.secret",

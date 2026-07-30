@@ -7,6 +7,9 @@ shallow read of manifests for framework hints. Enough to tell a planning model
 
 from __future__ import annotations
 
+import json
+import re
+import tomllib
 from pathlib import Path
 
 # Extension → language. Lowercased extension without the dot.
@@ -194,6 +197,11 @@ def find_test_paths(paths: list[str]) -> list[str]:
             any(seg in {"tests", "test", "__tests__", "spec"} for seg in segments)
             or base.startswith("test_")
             or base.endswith(("_test.go", "_test.py"))
+            # `django-admin startapp` generates `<app>/tests.py`, which matches
+            # none of the rules above — so on a stock Django project every test
+            # file was invisible to `affected_tests` and to the ranking `test`
+            # signal, and an empty selection looked like a correct answer.
+            or base in {"tests.py", "test.py"}
             or _is_js_ts_test(base)
         )
         if is_test:
@@ -211,17 +219,125 @@ def find_test_paths(paths: list[str]) -> list[str]:
     return sorted(seen)
 
 
+# A dependency name is a run of these characters; anything else (quotes, commas,
+# whitespace, version operators, `:`, `=`) terminates it. Used only for manifests
+# we cannot parse structurally (requirements.txt, go.mod, Gemfile, pom.xml, ...),
+# which are far less prose-heavy than pyproject.toml / package.json.
+_DEP_TOKEN_RE = re.compile(r"[A-Za-z0-9._@/-]+")
+
+# Keys whose *contents* are dependencies. Descending only into these is what
+# stops a free-text `description` from contributing names.
+_DEP_KEYS = frozenset(
+    {
+        "dependencies", "dev-dependencies", "devdependencies", "peerdependencies",
+        "optionaldependencies", "optional-dependencies", "build-dependencies",
+        "require", "require-dev",
+    }
+)
+
+_PEP508_NAME_RE = re.compile(r"^\s*([A-Za-z0-9._-]+)")
+
+
+def _requirement_name(spec: str) -> str:
+    """The bare package name from a requirement string.
+
+    ``fastapi[standard]>=0.110`` -> ``fastapi``; ``django~=5.0`` -> ``django``.
+    """
+
+    match = _PEP508_NAME_RE.match(spec.lower())
+    return match.group(1) if match else ""
+
+
+def _dependency_tokens(text: str) -> set[str]:
+    """Every candidate dependency name in an unparseable manifest, lowercased.
+
+    Slash-separated paths contribute *all* their segments, because the framework
+    marker is often a middle one (``github.com/gin-gonic/gin``).
+    """
+
+    tokens: set[str] = set()
+    for raw in _DEP_TOKEN_RE.findall(text.lower()):
+        token = raw.strip(".-/")
+        if not token:
+            continue
+        tokens.add(token)
+        tokens.update(seg for seg in token.split("/") if seg)
+    return tokens
+
+
+def _collect_dep_names(node: object, inside: bool, out: set[str]) -> None:
+    """Recursively gather dependency names, descending into dependency keys only."""
+
+    if isinstance(node, dict):
+        for key, value in node.items():
+            lowered = str(key).lower()
+            if inside:
+                out.add(lowered)  # a mapping under a dep key is name -> spec
+            _collect_dep_names(value, inside or lowered in _DEP_KEYS, out)
+    elif isinstance(node, list):
+        for item in node:
+            if inside and isinstance(item, str):
+                out.add(_requirement_name(item))
+            else:
+                _collect_dep_names(item, inside, out)
+
+
+def _structured_dep_names(manifest: str, text: str) -> set[str] | None:
+    """Dependency names parsed out of a manifest, or None if it isn't parseable.
+
+    pyproject.toml and package.json — the two most common manifests — both carry
+    free-text ``description``/``keywords`` fields, which is exactly why a raw scan
+    misfires on them. For those we read only where dependencies actually live.
+    """
+
+    base = _basename(manifest)
+    try:
+        if base in {"pyproject.toml", "Cargo.toml"}:
+            data: object = tomllib.loads(text)
+        elif base in {"package.json", "composer.json"}:
+            data = json.loads(text)
+        else:
+            return None
+    except (tomllib.TOMLDecodeError, json.JSONDecodeError, ValueError):
+        return None  # malformed manifest: fall back to the token scan
+
+    names: set[str] = set()
+    _collect_dep_names(data, False, names)
+    names.discard("")
+    return names
+
+
+def _marker_matches(marker: str, names: set[str]) -> bool:
+    """True if *marker* names one of *names* — exactly, or as its hyphenated or
+    scoped package prefix (``actix`` matches ``actix-web``; ``spring-boot``
+    matches ``spring-boot-starter-web``) — but never as a bare substring, so
+    "reactive" does not count as "react"."""
+
+    if marker in names:
+        return True
+    return any(n.startswith(marker + "-") or n.startswith(marker + "/") for n in names)
+
+
 def detect_frameworks(root: Path, manifests: list[str]) -> list[str]:
-    """Shallow-read manifests and match dependency names to known frameworks."""
+    """Shallow-read manifests and match *dependency names* to known frameworks.
+
+    Matching is on whole dependency names, not substrings of the raw file. A
+    substring scan let a manifest's prose masquerade as a dependency — a
+    description containing "next" or "reactive" reported Next.js and React — and
+    those false frameworks went into the planning prompt as if they were fact.
+    """
 
     found: list[str] = []
     for manifest in manifests:
         path = root / manifest
         try:
-            text = path.read_text(encoding="utf-8", errors="replace").lower()
+            text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
+        names = _structured_dep_names(manifest, text)
+        if names is None:
+            names = _dependency_tokens(text)
         for marker, name in _FRAMEWORK_MARKERS.items():
-            if marker in text and name not in found:
+            if name not in found and _marker_matches(marker, names):
                 found.append(name)
     return found

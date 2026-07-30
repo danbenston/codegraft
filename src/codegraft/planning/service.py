@@ -86,6 +86,18 @@ def generate_plan(
     return plan
 
 
+def _title_case(request: str) -> str:
+    """Upper-case the first character only.
+
+    ``str.capitalize()`` also *lower-cases the remainder*, which mangles the
+    acronyms that show up in real requests ("Add RBAC to admin routes" became
+    "Add rbac to admin routes").
+    """
+
+    text = request.strip()
+    return text[:1].upper() + text[1:]
+
+
 def build_stub_plan(request: str, repo_root: Path, config: Config) -> ImplementationPlan:
     """Return a representative, hand-built plan (no model call).
 
@@ -94,7 +106,7 @@ def build_stub_plan(request: str, repo_root: Path, config: Config) -> Implementa
     """
 
     return ImplementationPlan(
-        title=request.strip().capitalize() or "Implementation Plan",
+        title=_title_case(request) or "Implementation Plan",
         feature_summary=(
             f'[STUB] This is a placeholder plan for the request: "{request.strip()}". '
             "Run without --stub (with an API key set) for a real, evidence-backed plan."

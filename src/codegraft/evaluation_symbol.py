@@ -73,8 +73,7 @@ def run_symbol_eval(root: Path, config: Config) -> SymbolEvalReport:
             spans.append(span_len)
             if was_truncated:
                 truncated += 1
-            if lines:
-                savings.append(1.0 - span_len / len(lines))
+            savings.append(1.0 - span_len / len(lines))  # lines is non-empty here
 
     return SymbolEvalReport(
         files_total=scan.file_count,

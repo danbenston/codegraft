@@ -234,6 +234,9 @@ def impact(
     transitive: bool = typer.Option(
         False, "--transitive", help="Also show the full transitive reverse closure."
     ),
+    subdir: str | None = typer.Option(
+        None, "--subdir", help="Scope analysis to a repo-relative subdirectory."
+    ),
 ) -> None:
     """Show what depends on a file — blast-radius triage before you edit it.
 
@@ -247,7 +250,7 @@ def impact(
 
     try:
         config = Config.load(repo)
-        scan = discover_repo(repo, config)
+        scan = discover_repo(repo, config, subdir=subdir)
         result = impact_of(target, scan, repo, config, transitive=transitive)
     except CodegraftError as exc:
         err_console.print(f"[red]error:[/red] {exc}")
@@ -312,6 +315,9 @@ def symbol(
     in_path: str | None = typer.Option(
         None, "--in", help="Restrict the search to one repo-relative file."
     ),
+    subdir: str | None = typer.Option(
+        None, "--subdir", help="Scope analysis to a repo-relative subdirectory."
+    ),
 ) -> None:
     """Fetch one symbol definition instead of reading the whole file.
 
@@ -325,7 +331,7 @@ def symbol(
 
     try:
         config = Config.load(repo)
-        scan = discover_repo(repo, config)
+        scan = discover_repo(repo, config, subdir=subdir)
         hits = find_symbol(name, scan, repo, config, in_path=in_path)
     except CodegraftError as exc:
         err_console.print(f"[red]error:[/red] {exc}")
@@ -371,6 +377,9 @@ def affected_tests_cmd(
     since: str | None = typer.Option(
         None, "--since", help="Derive the changed set from `git diff --name-only <ref>`."
     ),
+    subdir: str | None = typer.Option(
+        None, "--subdir", help="Scope analysis to a repo-relative subdirectory."
+    ),
 ) -> None:
     """Select the tests that depend on changed files (selection only — never runs them).
 
@@ -393,7 +402,7 @@ def affected_tests_cmd(
             raise CodegraftError(
                 "no changed files given — pass files or --since <ref>"
             )
-        scan = discover_repo(repo, config)
+        scan = discover_repo(repo, config, subdir=subdir)
         summary = summarize(scan)
         result = affected_tests(changed, scan, summary, repo, config)
     except CodegraftError as exc:
