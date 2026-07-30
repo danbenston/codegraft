@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from codegraft.config import Config
+from codegraft.errors import CodegraftError
 from codegraft.repo.analyze import analyze_repo
 from codegraft.repo.discover import discover_repo
 from codegraft.repo.graph import affected_tests, impact_of
@@ -205,9 +206,22 @@ def generate_plan_payload(
 
 
 def build_server() -> Any:
-    """Construct the FastMCP server with codegraft's tools registered."""
+    """Construct the FastMCP server with codegraft's tools registered.
 
-    from mcp.server.fastmcp import FastMCP
+    Raises :class:`CodegraftError` with install guidance when the SDK is absent
+    *or* present at an incompatible major — the 2.0 SDK moved
+    ``mcp.server.fastmcp``, and a raw ``ModuleNotFoundError`` out of the
+    ``codegraft-mcp`` console script tells the user nothing actionable.
+    """
+
+    try:
+        from mcp.server.fastmcp import FastMCP
+    except ImportError as exc:
+        raise CodegraftError(
+            "could not import mcp.server.fastmcp. Install a supported MCP SDK "
+            'with: pip install "codegraft[mcp]" (codegraft targets mcp>=1.2,<2; '
+            "the 2.0 SDK relocated this module and is not supported yet)."
+        ) from exc
 
     server = FastMCP("codegraft")
 
@@ -309,9 +323,21 @@ def build_server() -> Any:
 
 
 def main() -> None:
-    """Console entry point: run the server over stdio."""
+    """Console entry point: run the server over stdio.
 
-    build_server().run()
+    A missing/incompatible SDK is a setup problem, not a crash: report it on
+    stderr and exit non-zero rather than dumping a traceback into the stdio
+    channel an MCP client is trying to speak JSON-RPC over.
+    """
+
+    import sys
+
+    try:
+        server = build_server()
+    except CodegraftError as exc:
+        print(f"codegraft-mcp: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+    server.run()
 
 
 if __name__ == "__main__":

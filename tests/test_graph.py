@@ -250,6 +250,29 @@ def test_resolve_target_path_suffix(tmp_path: Path) -> None:
     assert candidates == []
 
 
+def test_resolve_target_dotfile_path(tmp_path: Path) -> None:
+    """A path inside a dot-directory resolves.
+
+    Regression: normalization used ``lstrip("./")``, whose *character set* ate the
+    leading dot, so ".github/workflows/ci.yml" became "github/workflows/ci.yml"
+    and matched nothing — the fully-qualified path failed while the bare basename
+    worked, which is exactly backwards.
+    """
+
+    write(tmp_path, "pyproject.toml", "[project]\n")
+    write(tmp_path, ".github/workflows/ci.yml", "name: ci\n")
+    scan, _config_ = _scan(tmp_path)
+
+    assert resolve_target(".github/workflows/ci.yml", scan) == (
+        ".github/workflows/ci.yml", [],
+    )
+    # The bare basename and a "./"-prefixed form still resolve too.
+    assert resolve_target("ci.yml", scan)[0] == ".github/workflows/ci.yml"
+    assert resolve_target("./.github/workflows/ci.yml", scan)[0] == (
+        ".github/workflows/ci.yml"
+    )
+
+
 # --- Plan C: affected_tests (test-impact selection) ---
 
 

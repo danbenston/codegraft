@@ -41,12 +41,39 @@ class PlanProvider(Protocol):
         ...
 
 
-# Models that reject sampling parameters (temperature/top_p/top_k) — the
-# provider must not send `temperature` to these or the API returns 400.
-_NO_SAMPLING_PREFIXES = ("claude-opus-4-7", "claude-opus-4-8", "claude-fable-5")
+# Models known to reject sampling parameters (temperature/top_p/top_k) — the
+# provider must not send `temperature` to these or the API returns 400. This is a
+# fast path only: providers keep shipping models with this restriction, so the
+# list goes stale by default and `rejects_temperature` below is the real net.
+_NO_SAMPLING_PREFIXES = (
+    "claude-opus-4-7", "claude-opus-4-8", "claude-fable-5",
+    # OpenAI reasoning models reject sampling params the same way.
+    "o1", "o3", "o4", "gpt-5",
+)
 
 
 def supports_temperature(model: str) -> bool:
-    """True if *model* accepts a temperature parameter."""
+    """True if *model* is not known to reject a temperature parameter."""
 
     return not any(model.startswith(p) for p in _NO_SAMPLING_PREFIXES)
+
+
+# Substrings that mark an API error as "you sent temperature and I don't take it".
+_TEMPERATURE_REFUSAL_MARKERS = (
+    "unsupported", "not supported", "does not support", "unexpected", "invalid",
+    "unrecognized", "cannot be specified",
+)
+
+
+def rejects_temperature(exc: Exception) -> bool:
+    """True if *exc* looks like an API complaint about the ``temperature`` param.
+
+    Recognising the refusal is what keeps a stale ``_NO_SAMPLING_PREFIXES`` from
+    becoming a hard failure: a provider that rejects the parameter costs no tokens
+    (the request never ran), so the caller can safely retry once without it.
+    """
+
+    message = str(exc).lower()
+    return "temperature" in message and any(
+        marker in message for marker in _TEMPERATURE_REFUSAL_MARKERS
+    )

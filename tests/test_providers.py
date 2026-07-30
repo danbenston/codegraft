@@ -14,7 +14,11 @@ from codegraft.models.plan import ImplementationPlan
 from codegraft.models.repo import RepoSummary
 from codegraft.planning.service import generate_plan, get_provider
 from codegraft.providers.anthropic_provider import AnthropicProvider
-from codegraft.providers.base import PlanningRequest, supports_temperature
+from codegraft.providers.base import (
+    PlanningRequest,
+    rejects_temperature,
+    supports_temperature,
+)
 from codegraft.providers.openai_provider import OpenAIProvider
 from codegraft.providers.prompt import build_planning_prompt
 from tests.conftest import write
@@ -163,6 +167,60 @@ def test_supports_temperature_helper() -> None:
     assert supports_temperature("claude-sonnet-4-6")
     assert not supports_temperature("claude-opus-4-8")
     assert not supports_temperature("claude-fable-5")
+    # OpenAI reasoning models reject sampling params the same way.
+    assert not supports_temperature("gpt-5")
+    assert not supports_temperature("o3-mini")
+    assert supports_temperature("gpt-4o")
+
+
+def test_rejects_temperature_recognises_refusal() -> None:
+    assert rejects_temperature(RuntimeError(
+        "400 Unsupported parameter: 'temperature' is not supported with this model"
+    ))
+    assert rejects_temperature(RuntimeError("`temperature` cannot be specified"))
+    # Unrelated failures must not be mistaken for a parameter refusal.
+    assert not rejects_temperature(RuntimeError("429 rate limited"))
+    assert not rejects_temperature(RuntimeError("invalid api key"))
+
+
+def test_anthropic_retries_once_without_rejected_temperature() -> None:
+    """A model missing from the denylist must degrade, not fail: on a temperature
+    refusal we retry once without it (a rejected request costs no tokens)."""
+
+    client = _FakeClient(_content_response(_sample_plan()))
+    real_create = client.messages.create
+    seen: list[dict] = []
+
+    def flaky(**kwargs):
+        seen.append(kwargs)
+        if "temperature" in kwargs:
+            raise RuntimeError("400 unsupported parameter: temperature")
+        return real_create(**kwargs)
+
+    client.messages.create = flaky  # type: ignore[assignment]
+    # sonnet-4-6 is on the "supported" side, so temperature is sent first...
+    plan = AnthropicProvider(_config("claude-sonnet-4-6"), client=client).generate_plan(
+        _request()
+    )
+
+    assert plan.title == "Sample"
+    assert len(seen) == 2
+    assert seen[0]["temperature"] == 0.2
+    assert "temperature" not in seen[1]
+
+
+def test_anthropic_unrelated_error_is_not_retried() -> None:
+    client = _FakeClient(_content_response(_sample_plan()))
+    calls: list[dict] = []
+
+    def always_fail(**kwargs):
+        calls.append(kwargs)
+        raise RuntimeError("network down")
+
+    client.messages.create = always_fail  # type: ignore[assignment]
+    with pytest.raises(ProviderError, match="network down"):
+        AnthropicProvider(_config(), client=client).generate_plan(_request())
+    assert len(calls) == 1  # no pointless second call
 
 
 # --- OpenAI provider (mocked) ---------------------------------------------
@@ -212,6 +270,41 @@ def test_openai_unparsable_raises() -> None:
     client, _ = _fake_openai_client(parsed=None, refusal="cannot comply")
     with pytest.raises(PlanValidationError, match="refusal"):
         OpenAIProvider(_oa_config(), client=client).generate_plan(_request())
+
+
+def test_openai_temperature_sent_only_when_supported() -> None:
+    """Regression: the OpenAI adapter sent temperature unconditionally while the
+    Anthropic one gated it, so a reasoning model turned a valid config into a 400."""
+
+    client, parser = _fake_openai_client(_sample_plan())
+    OpenAIProvider(_oa_config("gpt-4o"), client=client).generate_plan(_request())
+    assert parser.calls[0].get("temperature") == 0.2
+
+    client, parser = _fake_openai_client(_sample_plan())
+    OpenAIProvider(_oa_config("gpt-5"), client=client).generate_plan(_request())
+    assert "temperature" not in parser.calls[0]
+
+
+def test_openai_retries_once_without_rejected_temperature() -> None:
+    parser = SimpleNamespace(calls=[])
+
+    def parse(**kwargs):
+        parser.calls.append(kwargs)
+        if "temperature" in kwargs:
+            raise RuntimeError("400 Unsupported parameter: 'temperature'")
+        return SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(parsed=_sample_plan(), refusal=None)
+            )]
+        )
+
+    parser.parse = parse
+    client = SimpleNamespace(beta=SimpleNamespace(chat=SimpleNamespace(completions=parser)))
+    plan = OpenAIProvider(_oa_config("gpt-4o"), client=client).generate_plan(_request())
+
+    assert plan.title == "Sample"
+    assert len(parser.calls) == 2
+    assert "temperature" not in parser.calls[1]
 
 
 def test_openai_sdk_error_wrapped() -> None:
