@@ -145,10 +145,38 @@ def test_affected_tests_payload_shape(tmp_path: Path) -> None:
     json.dumps(payload)
 
 
+def test_build_server_reports_incompatible_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An SDK major that relocated `mcp.server.fastmcp` must produce actionable
+    guidance, not a bare ModuleNotFoundError out of the console script.
+
+    Regression: `mcp` 2.0.0 moved the module, and because the extra was pinned
+    only as `mcp>=1.2` it installed by default and broke the build.
+    """
+
+    import builtins
+
+    from codegraft.errors import CodegraftError
+    from codegraft.mcp import build_server
+
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args, **kwargs):
+        if name == "mcp.server.fastmcp":
+            raise ModuleNotFoundError("No module named 'mcp.server.fastmcp'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    with pytest.raises(CodegraftError, match=r"codegraft\[mcp\]"):
+        build_server()
+
+
 def test_build_server_registers_tools() -> None:
     import asyncio
 
-    pytest.importorskip("mcp")
+    # Guard on the submodule `build_server` actually imports, not just the
+    # top-level package: with an SDK major that moved `mcp.server.fastmcp`, a
+    # bare importorskip("mcp") passes and then the import fails hard.
+    pytest.importorskip("mcp.server.fastmcp")
     from codegraft.mcp import build_server
 
     server = build_server()
