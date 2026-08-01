@@ -199,3 +199,43 @@ def test_overlong_body_sets_truncated(tmp_path: Path) -> None:
     hit = hits[0]
     assert hit.truncated
     assert hit.span[1] - hit.span[0] + 1 == 10     # capped at the line limit
+
+
+def test_multiple_symbols_on_one_line_are_all_findable(tmp_path: Path) -> None:
+    # Regression: iteration stopped at the first match per line, so a symbol
+    # sharing a line was unreachable — a multi-selector CSS rule exposed only its
+    # first selector, which is a documented get_symbol use case.
+    write(tmp_path, "pyproject.toml", "[project]\n")
+    write(tmp_path, "web/site.css", ".card, .panel {\n  color: red;\n}\n")
+    scan, config = discover_repo(tmp_path, _config(tmp_path)), _config(tmp_path)
+
+    card = find_symbol("card", scan, tmp_path, config)
+    panel = find_symbol("panel", scan, tmp_path, config)
+
+    assert [h.path for h in card] == ["web/site.css"]
+    assert [h.path for h in panel] == ["web/site.css"]
+    # Both resolve to the same definition line, and neither is duplicated.
+    assert card[0].span[0] == panel[0].span[0] == 1
+
+
+def test_repeated_identifier_on_a_line_yields_one_hit(tmp_path: Path) -> None:
+    write(tmp_path, "pyproject.toml", "[project]\n")
+    write(tmp_path, "web/dup.css", ".btn, .btn {\n  color: red;\n}\n")
+    config = _config(tmp_path)
+    hits = find_symbol("btn", discover_repo(tmp_path, config), tmp_path, config)
+    assert len(hits) == 1
+
+
+def test_prefilter_does_not_change_results(tmp_path: Path) -> None:
+    # The cheap "every target token must appear in the text" filter is a
+    # necessary condition only — it must never drop a real definition.
+    write(tmp_path, "pyproject.toml", "[project]\n")
+    write(tmp_path, "app/a.py", "def admin_panel():\n    return 1\n")
+    write(tmp_path, "app/b.py", "def unrelated():\n    return 2\n")
+    config = _config(tmp_path)
+    scan = discover_repo(tmp_path, config)
+
+    # Style-insensitive matching still works through the prefilter.
+    hits = find_symbol("adminPanel", scan, tmp_path, config)
+    assert [h.path for h in hits] == ["app/a.py"]
+    assert find_symbol("nosuchsymbol", scan, tmp_path, config) == []

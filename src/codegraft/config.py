@@ -16,8 +16,10 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from codegraft.errors import ConfigError
 
 CONFIG_FILENAME = "codegraft.toml"
 
@@ -110,19 +112,34 @@ class Config(BaseModel):
         """
 
         data: dict = {}
-        if repo_root is not None:
-            config_path = repo_root / CONFIG_FILENAME
-            if config_path.is_file():
+        config_path = repo_root / CONFIG_FILENAME if repo_root is not None else None
+        if config_path is not None and config_path.is_file():
+            try:
                 with config_path.open("rb") as fh:
                     data = tomllib.load(fh)
+            except tomllib.TOMLDecodeError as exc:
+                raise ConfigError(f"{config_path} is not valid TOML: {exc}") from exc
+            except OSError as exc:
+                raise ConfigError(f"could not read {config_path}: {exc}") from exc
 
-        return cls(
-            provider=ProviderConfig(**data.get("provider", {})),
-            repo=RepoConfig(**data.get("repo", {})),
-            analysis=AnalysisConfig(**data.get("analysis", {})),
-            output=OutputConfig(**data.get("output", {})),
-            secrets=Secrets(),
-        )
+        # A typo'd value (e.g. max_ranked_files = "twelve") used to surface as a
+        # raw Pydantic ValidationError traceback, because the CLI only catches
+        # CodegraftError. Name the file and the offending field instead.
+        try:
+            return cls(
+                provider=ProviderConfig(**data.get("provider", {})),
+                repo=RepoConfig(**data.get("repo", {})),
+                analysis=AnalysisConfig(**data.get("analysis", {})),
+                output=OutputConfig(**data.get("output", {})),
+                secrets=Secrets(),
+            )
+        except ValidationError as exc:
+            where = str(config_path) if config_path is not None else "configuration"
+            problems = "; ".join(
+                f"{'.'.join(str(p) for p in err['loc'])}: {err['msg']}"
+                for err in exc.errors()
+            )
+            raise ConfigError(f"invalid config in {where} — {problems}") from exc
 
 
 # Default TOML content written by `codegraft init`.

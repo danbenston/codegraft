@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from codegraft.repo import detect
 from codegraft.repo.tree import build_tree
 
@@ -57,3 +59,54 @@ def test_build_tree_depth_and_width() -> None:
     assert "pkg/" in tree
     # Depth limit collapses deeper contents into an entry-count hint.
     assert "entries" in tree or "more" in tree
+
+
+def test_django_style_tests_py_is_a_test_path() -> None:
+    # `django-admin startapp` generates `<app>/tests.py`, which matches none of
+    # the dir/prefix/suffix rules — so on a stock Django project every test file
+    # was invisible and an empty affected_tests selection looked like a real answer.
+    tests = detect.find_test_paths(
+        ["shop/models.py", "shop/tests.py", "blog/test.py", "core/util.py"]
+    )
+    assert "shop/tests.py" in tests
+    assert "blog/test.py" in tests
+    assert "shop/models.py" not in tests
+    assert "core/util.py" not in tests
+
+
+def test_frameworks_ignore_manifest_prose(tmp_path: Path) -> None:
+    # Regression: markers were matched as substrings of the whole file, so a
+    # description mentioning "next" or "reactive" reported Next.js and React —
+    # false frameworks that went into the planning prompt as fact.
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "x"\n'
+        'description = "Plan the next feature; reactive views"\n'
+        'dependencies = ["fastapi[standard]>=0.110", "SQLAlchemy>=2.0"]\n',
+        encoding="utf-8",
+    )
+    found = detect.detect_frameworks(tmp_path, ["pyproject.toml"])
+    assert found == ["FastAPI", "SQLAlchemy"]
+
+
+def test_frameworks_match_hyphenated_and_scoped_packages(tmp_path: Path) -> None:
+    # A marker must still match when it is a package *prefix* (actix -> actix-web)
+    # or a path segment (gin-gonic inside a go.mod module path).
+    (tmp_path / "package.json").write_text(
+        '{"description":"a next-generation reactive app",'
+        '"dependencies":{"@nestjs/core":"^10","react-dom":"18"}}',
+        encoding="utf-8",
+    )
+    assert detect.detect_frameworks(tmp_path, ["package.json"]) == ["React", "NestJS"]
+
+    (tmp_path / "go.mod").write_text(
+        "module x\nrequire github.com/gin-gonic/gin v1.9.1\n", encoding="utf-8"
+    )
+    assert detect.detect_frameworks(tmp_path, ["go.mod"]) == ["Gin"]
+
+
+def test_frameworks_survive_a_malformed_manifest(tmp_path: Path) -> None:
+    # Unparseable JSON must fall back to the token scan, not crash or go silent.
+    (tmp_path / "package.json").write_text(
+        '{"dependencies": {"express": "4",,,', encoding="utf-8"
+    )
+    assert detect.detect_frameworks(tmp_path, ["package.json"]) == ["Express"]

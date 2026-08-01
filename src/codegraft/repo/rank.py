@@ -15,7 +15,6 @@ A final diversity penalty stops one directory from dominating the results.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from codegraft.config import Config
@@ -26,22 +25,18 @@ from codegraft.repo.imports import (
     _read_head,
     _referenced_paths,
 )
+from codegraft.repo.patterns import (
+    STYLE_SYMBOL_RE,
+    SYMBOL_RE,
+    TEMPLATE_SYMBOL_RE,
+    is_code,
+)
 from codegraft.utils.text import (
     extract_keywords,
     request_intent,
     split_identifier,
     tokenize,
 )
-
-# Languages whose files carry meaningful def/class symbols. Docs and data files
-# (Markdown, JSON, TOML, ...) are excluded so code blocks inside a README or the
-# project blueprint don't get scored as if they were real source symbols.
-_NON_CODE_LANGS = {"Markdown", "JSON", "YAML", "TOML", "HTML", "CSS", "Text"}
-
-
-def _is_code(path: str) -> bool:
-    lang = detect.language_of(path)
-    return lang is not None and lang not in _NON_CODE_LANGS
 
 # --- Scoring weights (tunable). Kept as named constants so `inspect` output can
 # be read against them while tuning. ---
@@ -104,31 +99,6 @@ _NEUTRAL_ROLES: dict[str, float] = {
 ROLE_OPPOSING_INTENT_FACTOR = 0.4
 
 _TEST_REQUEST_TOKENS = {"test", "tests", "testing", "coverage", "regression"}
-
-_SYMBOL_RE = re.compile(
-    r"\b(?:def|class|func|function|type|struct|interface|fn|const|var)\s+([A-Za-z_]\w*)"
-)
-
-# Template "symbols": the keyword-bearing names in an HTML template that a request
-# can actually name. Django/Jinja block names (`{% block content %}`) and
-# component-like custom element tags (`<UserCard>`, `<user-card>`) — but NOT plain
-# HTML tags (`<div>`), which would be pure noise. Gives templates a symbol signal
-# they were denied by being a "non-code" language.
-_TEMPLATE_SYMBOL_RE = re.compile(
-    r"{%-?\s*block\s+([A-Za-z_][\w-]*)"          # {% block content %}
-    r"|<([A-Z][A-Za-z0-9]*|[a-z][\w]*-[\w-]+)\b"  # <Component> or <web-component>
-)
-
-# Stylesheet "symbols": the keyword-bearing names in a CSS file a request can
-# actually name — class selectors (`.hex-grid`), id selectors (`#board`), and
-# custom properties (`--hex-size`). Plain property names/values and numeric
-# fractions (`.5em`) are deliberately *not* matched (pure noise), mirroring how
-# the template regex skips bare `<div>` tags. Gives stylesheets a symbol signal
-# they were denied by being a "non-code" language.
-_STYLE_SYMBOL_RE = re.compile(
-    r"[.#]([A-Za-z_][\w-]*)"      # .class or #id selector
-    r"|(--[A-Za-z_][\w-]*)"        # --custom-property
-)
 
 # How many files to read content for, per scale mode.
 _STAGE2_LIMIT = {"normal": 50, "medium": 35, "large": 20}
@@ -262,14 +232,14 @@ def _stage2_signals(rel_path: str, text: str, keywords: set[str]) -> dict[str, f
     # component names and class/id/custom-property names are real, request-
     # nameable symbols, so each "non-code" frontend language gets its own pattern.
     symbol_tokens: set[str] = set()
-    if _is_code(rel_path):
-        for match in _SYMBOL_RE.finditer(text):
+    if is_code(rel_path):
+        for match in SYMBOL_RE.finditer(text):
             symbol_tokens.update(split_identifier(match.group(1)))
     elif detect.language_of(rel_path) == "HTML":
-        for block, tag in _TEMPLATE_SYMBOL_RE.findall(text):
+        for block, tag in TEMPLATE_SYMBOL_RE.findall(text):
             symbol_tokens.update(split_identifier(block or tag))
     elif detect.language_of(rel_path) == "CSS":
-        for selector, prop in _STYLE_SYMBOL_RE.findall(text):
+        for selector, prop in STYLE_SYMBOL_RE.findall(text):
             symbol_tokens.update(split_identifier(selector or prop))
 
     symbol_overlap = len(keywords & symbol_tokens)

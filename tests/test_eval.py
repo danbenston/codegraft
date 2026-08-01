@@ -134,3 +134,31 @@ def test_run_eval_ablation_runs_both_ways(tmp_path: Path) -> None:
     assert on.use_import_edge and not off.use_import_edge
     # The caller's config is copied, never mutated, by either run.
     assert config.analysis.use_import_edge is True
+
+
+def test_prebuilt_scan_matches_a_fresh_analysis(tmp_path: Path) -> None:
+    """`analyze_repo` must rank identically whether it scans or is handed a scan.
+
+    run_eval reuses one scan across every commit (discovery is
+    request-independent); that optimisation is only safe if it changes nothing.
+    """
+
+    from codegraft.repo.analyze import analyze_repo
+    from codegraft.repo.discover import discover_repo
+    from codegraft.repo.summarize import summarize
+
+    write(tmp_path, "pyproject.toml", "[project]\n")
+    write(tmp_path, "app/routes/admin.py", "def admin(role):\n    return role\n")
+    write(tmp_path, "app/models/user.py", "class User:\n    role = 'x'\n")
+    config = Config.load(tmp_path)
+    config.repo.prefer_git_ls_files = False
+
+    scan = discover_repo(tmp_path, config)
+    summary = summarize(scan)
+    for request in ("add role based access", "rename the user model"):
+        fresh = analyze_repo(request, tmp_path, config)
+        reused = analyze_repo(request, tmp_path, config, scan=scan, summary=summary)
+        assert [(r.path, r.score) for r in fresh.ranked] == [
+            (r.path, r.score) for r in reused.ranked
+        ]
+        assert [s.path for s in fresh.snippets] == [s.path for s in reused.snippets]

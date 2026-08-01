@@ -109,3 +109,25 @@ def test_truncates_at_max_candidate_files(tmp_path: Path) -> None:
     scan = discover_repo(tmp_path, config)
     assert scan.file_count == 3
     assert scan.truncated is True
+
+
+def test_additional_credential_shapes_are_excluded(tmp_path: Path) -> None:
+    """Credential files that slipped past the original denylist.
+
+    Notably the *suffix* env form: `.env` and `.env.*` were covered but
+    "production.env" matched neither, and this denylist is the one place whose
+    posture is "when unsure, exclude".
+    """
+
+    from codegraft.repo import safety
+
+    for name in (
+        "production.env", "local.env", "credentials.json", ".netrc",
+        "_netrc", ".git-credentials", "terraform.tfvars", "auth.p8", "key.asc",
+    ):
+        assert safety.classify(name, tmp_path / name, 10, 1_000) == "secret", name
+
+    # Ordinary source files are untouched by the widened patterns.
+    for name in ("environment.py", "credentials_test_helper.py", "main.py"):
+        write(tmp_path, name, "x = 1\n")
+        assert safety.classify(name, tmp_path / name, 10, 1_000) is None, name

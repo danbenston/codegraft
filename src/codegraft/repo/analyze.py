@@ -45,11 +45,26 @@ class RepoAnalysis:
         ones, so this is the realistic alternative the bundle is measured
         against. The figure thus reflects the snippet-extraction win, not an
         inflated whole-repo comparison.
+
+        Both sides are measured in **characters**. The baseline used to come from
+        ``size_bytes``, which overstates any file with non-ASCII content (UTF-8
+        multibyte) and so quietly inflated a figure the module docstring defends
+        as honest; re-reading the selected files keeps the units comparable.
         """
 
         selected_paths = {s.path for s in self.snippets}
         sizes = {f.path: f.size_bytes for f in self.scan.files}
-        baseline_chars = sum(sizes.get(p, 0) for p in selected_paths)
+        root = Path(self.scan.root)
+        baseline_chars = 0
+        for path in selected_paths:
+            try:
+                baseline_chars += len(
+                    (root / path).read_text(encoding="utf-8", errors="replace")
+                )
+            except OSError:
+                # Unreadable now (deleted/renamed mid-run): fall back to the
+                # byte size, which is an upper bound rather than a silent zero.
+                baseline_chars += sizes.get(path, 0)
         return estimate_savings(
             baseline_chars=baseline_chars,
             bundle_chars=self.context_chars,
@@ -58,13 +73,25 @@ class RepoAnalysis:
 
 
 def analyze_repo(
-    request: str, root: Path, config: Config, subdir: str | None = None
+    request: str,
+    root: Path,
+    config: Config,
+    subdir: str | None = None,
+    *,
+    scan: RepoScan | None = None,
+    summary: RepoSummary | None = None,
 ) -> RepoAnalysis:
     """Discover, summarize, rank, and extract snippets for *request*.
 
     Ranking and snippet selection use a focused *signal* derived from the
     request (so a long, constraint-heavy request doesn't dilute file ranking),
     while the full request is preserved for the planning prompt.
+
+    Discovery and summarization do not depend on *request*, so a caller running
+    many requests against one tree (the eval harness) can pass a prebuilt *scan*
+    and *summary* to skip the rescan. Both are treated as read-only. When *scan*
+    is supplied it must already be scoped to *subdir*, which is then only
+    recorded, not re-applied.
     """
 
     signal = ranking_signal(request)
@@ -72,8 +99,10 @@ def analyze_repo(
     # the focused signal — a long request's file mention often lives in a clause
     # `ranking_signal` truncates away.
     named_files = extract_named_files(request)
-    scan = discover_repo(root, config, subdir=subdir)
-    summary = summarize(scan)
+    if scan is None:
+        scan = discover_repo(root, config, subdir=subdir)
+    if summary is None:
+        summary = summarize(scan)
     ranked = rank_files(signal, scan, summary, config, named_files=named_files)
     snippets = extract_snippets(signal, ranked, scan, config)
     return RepoAnalysis(

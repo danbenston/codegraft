@@ -73,7 +73,14 @@ def test_baseline_excludes_unselected_files(tmp_path: Path) -> None:
     sizes = {f.path: f.size_bytes for f in analysis.scan.files}
     # Fewer files surfaced than exist: the baseline is a genuine subset.
     assert len(selected) < len(sizes)
-    # Baseline equals exactly the selected files' full size — nothing else.
-    assert est.baseline_chars == sum(sizes[p] for p in selected)
+    # Baseline equals exactly the selected files, read in full — nothing else.
+    # Measured in *characters*, the same unit as the snippet side: `size_bytes`
+    # counts a CRLF line ending as two and multibyte UTF-8 as several, either of
+    # which would overstate a figure `utils/tokens.py` defends as honest.
+    expected = sum(
+        len((tmp_path / p).read_text(encoding="utf-8", errors="replace"))
+        for p in selected
+    )
+    assert est.baseline_chars == expected
     # The whole-repo size is far larger; the honest baseline ignores it.
     assert est.baseline_chars < sum(sizes.values())

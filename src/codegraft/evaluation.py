@@ -28,11 +28,13 @@ from pathlib import Path
 
 from codegraft.config import Config
 from codegraft.repo.analyze import analyze_repo
+from codegraft.repo.discover import discover_repo
 from codegraft.repo.git_scan import (
     commit_changed_files,
     commit_subject,
     recent_commit_shas,
 )
+from codegraft.repo.summarize import summarize
 
 
 @dataclass
@@ -155,6 +157,14 @@ def run_eval(
     cfg.analysis.use_intent_roles = use_intent_roles
     cfg.analysis.use_named_file_boost = use_named_file_boost
 
+    # Discovery and summarization are request-independent, so build them once and
+    # reuse across commits — matching what the graph validators already do. Each
+    # commit used to trigger a full rescan (git subprocess + per-file stat +
+    # binary sniff), making an --ablation run pay for 2N scans it did not need.
+    scan = discover_repo(root, cfg)
+    summary = summarize(scan)
+    candidate_paths = {f.path for f in scan.files}
+
     report = EvalReport(
         k=k, use_import_edge=use_import_edge, use_intent_roles=use_intent_roles,
         use_named_file_boost=use_named_file_boost,
@@ -162,9 +172,8 @@ def run_eval(
     for sha in shas:
         subject = commit_subject(root, sha)
         gold = commit_changed_files(root, sha)
-        analysis = analyze_repo(subject, root, cfg)
+        analysis = analyze_repo(subject, root, cfg, scan=scan, summary=summary)
         ranked_paths = [r.path for r in analysis.ranked]
-        candidate_paths = {f.path for f in analysis.scan.files}
         report.cases.append(
             score_case(sha, subject, gold, ranked_paths, candidate_paths, k)
         )

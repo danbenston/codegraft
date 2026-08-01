@@ -7,8 +7,8 @@ class / selector instead of the whole file. The single biggest read-side token
 win observed in the field.
 
 Location and block-extent are **heuristic**, not compiler-accurate: this reuses
-the same definition regexes as the ranking symbol signal (``_SYMBOL_RE`` for code,
-``_TEMPLATE_SYMBOL_RE`` / ``_STYLE_SYMBOL_RE`` for HTML/CSS) and a small,
+the same definition regexes as the ranking symbol signal (``SYMBOL_RE`` for code,
+``TEMPLATE_SYMBOL_RE`` / ``STYLE_SYMBOL_RE`` for HTML/CSS) and a small,
 dependency-free block-extent tier per language. It is **not** ``find_references``
 or ``go_to_definition`` — those need real cross-file resolution (an LSP). Precision
 target: "good enough to avoid a full-file read."
@@ -25,11 +25,11 @@ from codegraft.config import Config
 from codegraft.models.repo import RepoScan
 from codegraft.repo import detect
 from codegraft.repo.graph import resolve_target
-from codegraft.repo.rank import (
-    _STYLE_SYMBOL_RE,
-    _SYMBOL_RE,
-    _TEMPLATE_SYMBOL_RE,
-    _is_code,
+from codegraft.repo.patterns import (
+    STYLE_SYMBOL_RE,
+    SYMBOL_RE,
+    TEMPLATE_SYMBOL_RE,
+    is_code,
 )
 from codegraft.repo.snippets import _render
 from codegraft.utils.text import split_identifier
@@ -63,13 +63,13 @@ def _regex_for(path: str) -> re.Pattern[str] | None:
     """The definition regex appropriate to *path*'s language, or None if the file
     type carries no request-nameable symbols (docs, data, plain text)."""
 
-    if _is_code(path):
-        return _SYMBOL_RE
+    if is_code(path):
+        return SYMBOL_RE
     lang = detect.language_of(path)
     if lang == "HTML":
-        return _TEMPLATE_SYMBOL_RE
+        return TEMPLATE_SYMBOL_RE
     if lang == "CSS":
-        return _STYLE_SYMBOL_RE
+        return STYLE_SYMBOL_RE
     return None
 
 
@@ -88,17 +88,24 @@ def _iter_symbol_defs(path: str, lines: list[str]) -> Iterator[tuple[int, str]]:
     Cheap: matches the definition regex per line and yields the captured name
     without computing extents — extent/render is done only for the symbols a
     caller actually keeps.
+
+    *Every* match on a line is yielded, not just the first. Stopping at the first
+    made any symbol sharing a line unreachable — a multi-selector CSS rule
+    (``.card, .panel {``) exposed only ``.card``, and ``const a = 1, b = 2``
+    only ``a``. Duplicate names on one line are de-duplicated so a repeated
+    identifier cannot produce two identical hits.
     """
 
     regex = _regex_for(path)
     if regex is None:
         return
     for i, line in enumerate(lines):
+        seen: set[str] = set()
         for match in regex.finditer(line):
             name = _captured_name(match)
-            if name:
+            if name and name not in seen:
+                seen.add(name)
                 yield i, name
-                break  # one definition per line is enough
 
 
 def _indent(line: str) -> int:
@@ -212,6 +219,21 @@ def _make_hit(path: str, lines: list[str], start: int, name: str, max_lines: int
     )
 
 
+def _may_define(lines: list[str], target: list[str]) -> bool:
+    """Cheap necessary-condition filter before the per-line regex pass.
+
+    A hit requires ``split_identifier(captured) == target``, so *every* token of
+    the target must appear somewhere in the file's text. Checking that with a
+    couple of substring scans skips the regex work for the overwhelming majority
+    of files in the unscoped case, without changing which symbols are found.
+    """
+
+    if not target:
+        return False
+    lowered = "\n".join(lines).lower()
+    return all(token in lowered for token in target)
+
+
 def _read_lines(root: Path, path: str) -> list[str] | None:
     try:
         return (root / path).read_text(encoding="utf-8", errors="replace").splitlines()
@@ -255,6 +277,8 @@ def find_symbol(
     for path in files:
         lines = _read_lines(root, path)
         if lines is None:
+            continue
+        if not _may_define(lines, target):
             continue
         for start, captured in _iter_symbol_defs(path, lines):
             if split_identifier(captured) == target:
